@@ -1,5 +1,6 @@
 const Applet = imports.ui.applet;
 const AppletManager = imports.ui.appletManager;
+const Extension = imports.ui.extension;
 const Main = imports.ui.main;
 const Settings = imports.ui.settings;
 const Tooltips = imports.ui.tooltips;
@@ -8,6 +9,7 @@ const Clutter = imports.gi.Clutter;
 const St = imports.gi.St;
 const GLib = imports.gi.GLib;
 const Gtk = imports.gi.Gtk;
+const Pango = imports.gi.Pango;
 const XApp = imports.gi.XApp;
 
 // we draw the xapp icons ourselves, so the stock applet just stays hidden
@@ -19,6 +21,9 @@ const APPLET_ITEMS = {
     "old-style tray icons": "systray@cinnamon.org",
 };
 
+// names with a process id in them change every launch (electron apps, claude...)
+const GENERIC_NAME = /^(org\.(freedesktop|kde)\.statusnotifieritem-\d+-\d+|chrome_status_icon_\d+)$/;
+
 const CELL_PADDING = 14;
 
 // one icon from XApp.StatusIconMonitor (steam, telegram, nm-applet etc)
@@ -26,10 +31,11 @@ class XAppIcon {
     constructor(owner, proxy) {
         this.owner = owner;
         this.proxy = proxy;
-        this.id = proxy.name.toLowerCase();
-        this.size = 16;
+        this.size = 0;
         this.inPopup = false;
+        this.destroyed = false;
         this._loadHandle = null;
+        this.id = this._computeId();
 
         this.actor = new St.BoxLayout({
             style_class: "applet-box",
@@ -43,7 +49,9 @@ class XAppIcon {
             x_align: St.Align.MIDDLE, y_align: St.Align.MIDDLE,
             x_fill: false, y_fill: false,
         });
+        this._label = new St.Label({ y_align: Clutter.ActorAlign.CENTER, visible: false });
         this.actor.add_actor(this._holder);
+        this.actor.add_actor(this._label);
 
         this._tooltip = new Tooltips.Tooltip(this.actor, "");
 
@@ -56,41 +64,72 @@ class XAppIcon {
                 this._updateIcon();
             if ("TooltipText" in names)
                 this._updateTooltip();
-            if ("Visible" in names)
-                this.owner._relayout();
+            if ("Label" in names)
+                this._updateLabel();
             if ("PrimaryMenuIsOpen" in names || "SecondaryMenuIsOpen" in names)
                 this.actor.sync_hover();
+
+            let id = this._computeId();
+            if ("Visible" in names || id !== this.id) {
+                this.id = id;
+                this.owner._queueRelayout();
+            }
         });
 
         this._updateTooltip();
+        this._updateLabel();
+    }
+
+    // what the settings list remembers this icon by. null = nothing stable yet
+    _computeId() {
+        let name = (this.proxy.name || "").toLowerCase();
+        if (name && !GENERIC_NAME.test(name))
+            return name;
+        // the tooltip is steadier for those ("Discord", "Claude"). first part only,
+        // so "Discord - 3 mentions" stays "discord"
+        let tip = (this.proxy.tooltip_text || "").replace(/<[^>]*>/g, "").split("\n")[0];
+        tip = tip.split(/\s+[-–—|(:]/)[0].trim().toLowerCase();
+        if (tip)
+            return tip;
+        let icon = this.proxy.icon_name || "";
+        if (icon && !icon.includes("/"))
+            return icon.toLowerCase();
+        return null;
     }
 
     get visible() {
         return this.proxy.visible;
     }
 
-    setSize(size) {
+    setPlacement(inPopup, size) {
+        this.inPopup = inPopup;
+        this._updateLabel();
         if (size === this.size && this._holder.child)
             return;
+        // a hint for apps that send image files, so they render at the right size
+        if (size !== this.size)
+            this.proxy.icon_size = size;
         this.size = size;
         this._updateIcon();
     }
 
     _updateIcon() {
+        if (this.destroyed || !this.size)
+            return;
         let name = this.proxy.icon_name;
         if (!name) {
             this._holder.child = null;
             return;
         }
         let symbolic = name.includes("symbolic");
-        this.proxy.icon_size = this.size;
 
         // some apps (steam...) hand us a png path instead of a theme icon.
         // load it into a size x size square so a huge image can't blow up the panel
         if (name.includes("/") && !symbolic) {
             this._loadHandle = St.TextureCache.get_default().load_image_from_file_async(
                 name, this.size, this.size, (cache, handle, actor) => {
-                    if (handle === this._loadHandle)
+                    // the icon may be gone by the time the file is loaded
+                    if (!this.destroyed && handle === this._loadHandle)
                         this._holder.child = actor;
                 });
             return;
@@ -104,8 +143,23 @@ class XAppIcon {
 
     _updateTooltip() {
         let text = this.proxy.tooltip_text || "";
-        this._tooltip.set_markup(text);
+        // it's supposed to be markup, but "Tom & Jerry" isn't. show those as plain text
+        try {
+            Pango.parse_markup(text, -1, "");
+            this._tooltip.set_markup(text);
+        } catch (e) {
+            this._tooltip.set_text(text);
+        }
         this._tooltip.preventShow = !text;
+    }
+
+    // some apps show text next to the icon (a counter, a clock). only on the panel, like the
+    // stock tray, the pop-up keeps everything square
+    _updateLabel() {
+        let text = this.proxy.label || "";
+        let horizontal = this.owner._orientation === St.Side.TOP || this.owner._orientation === St.Side.BOTTOM;
+        this._label.text = text;
+        this._label.visible = !!text && !this.inPopup && horizontal;
     }
 
     // where the app should open its menu
@@ -155,6 +209,8 @@ class XAppIcon {
     }
 
     destroy() {
+        this.destroyed = true;
+        this._loadHandle = null;
         this.proxy.disconnect(this._propsId);
         this._tooltip.destroy();
         this.actor.destroy();
@@ -164,25 +220,44 @@ class XAppIcon {
 class TrayCollapseApplet extends Applet.Applet {
     constructor(metadata, orientation, panelHeight, instanceId) {
         super(orientation, panelHeight, instanceId);
+        this.setAllowedLayout(Applet.AllowedLayout.BOTH);
         this._orientation = orientation;
+
+        // two of us on one panel would fight over the same icons. the second one does nothing.
+        // (not max-instances 1: that makes cinnamon move the settings to a new file)
+        this._inert = AppletManager.getRunningInstancesForUuid(metadata.uuid)
+            .some(a => a !== this && a.panel === this.panel && !a._inert);
+        if (this._inert) {
+            this.actor.add_actor(new St.Icon({
+                icon_name: "dialog-warning-symbolic",
+                icon_type: St.IconType.SYMBOLIC,
+                icon_size: this.getPanelIconSize(St.IconType.SYMBOLIC),
+            }));
+            this.set_applet_tooltip(_("Tray Collapse is already on this panel, this one does nothing"));
+            return;
+        }
+
+        this._relayoutId = 0;
         this._reapplyId = 0;
+        this._reapplyTries = 0;
         this._enforceId = 0;
         this._regrabId = 0;
+        this._swallow = null;          // [signal id, timeout id] eating the release of a closing click
         this._lastIconClick = 0;
         this._grabbed = false;
         this._closeSignals = [];
         this._xappIcons = new Map();   // key: bus name + path
-        this._borrowed = [];           // [applet, cell] currently in the pop-up
+        this._borrowed = [];           // [applet, cell, hadTrackHover] currently in the pop-up
         this._hiddenApplets = new Set();
         this._watched = new Map();     // applet -> signal ids
         this._popupItems = [];
         this._origIconSize = new Map();  // applet icon -> its own size, while it's in the pop-up
 
         this.settings = new Settings.AppletSettings(this, metadata.uuid, instanceId);
-        this.settings.bind("icon-size", "iconSize", () => this._relayout());
-        this.settings.bind("one-row", "oneRow", () => this._relayout());
-        this.settings.bind("columns", "columns", () => this._relayout());
-        this.settings.bind("icons", "iconList", () => this._relayout());
+        this.settings.bind("icon-size", "iconSize", () => this._queueRelayout());
+        this.settings.bind("one-row", "oneRow", () => this._queueRelayout());
+        this.settings.bind("columns", "columns", () => this._queueRelayout());
+        this.settings.bind("icons", "iconList", () => this._queueRelayout());
         this.settings.bind("close-on-click", "closeOnClick");
 
         // panel: [pinned left][arrow][pinned right]
@@ -213,16 +288,27 @@ class TrayCollapseApplet extends Applet.Applet {
         this._signals = [
             [this._monitor, this._monitor.connect("icon-added", (m, proxy) => this._onIconAdded(proxy))],
             [this._monitor, this._monitor.connect("icon-removed", (m, proxy) => this._onIconRemoved(proxy))],
-            [Main.systrayManager, Main.systrayManager.connect("changed", () => this._relayout())],
-            [this.panel, this.panel.connect("icon-size-changed", () => this._relayout())],
+            [Main.systrayManager, Main.systrayManager.connect("changed", () => this._queueRelayout())],
+            [this.panel, this.panel.connect("icon-size-changed", () => {
+                this._updateArrow();
+                this._queueRelayout();
+            })],
             [global.settings, global.settings.connect("changed::panel-edit-mode", () => this._onEditModeChanged())],
             // tray applets can load after us, so redo things when the panel changes
             [global.settings, global.settings.connect("changed::enabled-applets", () => {
                 this.menu.close();
                 this._scheduleReapply();
             })],
+            // ...or get reloaded (an update), which makes a fresh, visible copy of them
+            [Extension.Type.APPLET, Extension.Type.APPLET.connect("extension-loaded", (type, uuid) => {
+                if (uuid === XAPP_UUID || Object.values(APPLET_ITEMS).includes(uuid)) {
+                    this.menu.close();
+                    this._scheduleReapply();
+                }
+            })],
         ];
 
+        this._applyOrientation();
         this._scheduleReapply();
         this._updateArrow();
     }
@@ -238,7 +324,7 @@ class TrayCollapseApplet extends Applet.Applet {
         if (this._xappIcons.has(key))
             return;
         this._xappIcons.set(key, new XAppIcon(this, proxy));
-        this._relayout();
+        this._queueRelayout();
     }
 
     _onIconRemoved(proxy) {
@@ -248,12 +334,12 @@ class TrayCollapseApplet extends Applet.Applet {
             return;
         icon.destroy();
         this._xappIcons.delete(key);
-        this._relayout();
+        this._queueRelayout();
     }
 
     // apps that have their own cinnamon applet (sound, network...) stay out, same as the stock tray
     _isIgnored(icon) {
-        return Main.systrayManager.getRoles().includes(icon.id);
+        return icon.id !== null && Main.systrayManager.getRoles().includes(icon.id);
     }
 
     _appletFor(uuid) {
@@ -274,28 +360,35 @@ class TrayCollapseApplet extends Applet.Applet {
         return items;
     }
 
-    // settings list, with anything new added at the end. only writes when something changed,
-    // a write while the settings window is open makes it refresh
+    // settings list: cleaned up, with anything new added at the end. only writes when
+    // something changed, a write while the settings window is open makes it refresh
     _entries(items) {
         let changed = false;
-        let list = (Array.isArray(this.iconList) ? this.iconList : []).map(e => {
+        let seen = new Set();
+        let list = [];
+        for (let e of Array.isArray(this.iconList) ? this.iconList : []) {
+            // junk or a second entry for the same icon
+            if (!e || typeof e.name !== "string" || !e.name || seen.has(e.name)) {
+                changed = true;
+                continue;
+            }
+            seen.add(e.name);
             // 3.0 had a single "where" field
             if (e.where !== undefined || e.show === undefined) {
                 changed = true;
-                return {
+                e = {
                     name: e.name,
                     show: e.where !== "hidden",
                     pinned: e.where === "panel" || e.where === "panel-right" || !!e.pinned,
                     right: e.where === "panel-right" || !!e.right,
                 };
             }
-            return e;
-        });
-        let known = new Set(list.map(e => e.name));
+            list.push(e);
+        }
         for (let item of items) {
-            if (!known.has(item.id)) {
+            if (item.id !== null && !seen.has(item.id)) {
                 list.push({ name: item.id, show: true, pinned: false, right: false });
-                known.add(item.id);
+                seen.add(item.id);
                 changed = true;
             }
         }
@@ -306,48 +399,61 @@ class TrayCollapseApplet extends Applet.Applet {
 
     // ---- layout ----
 
-    _relayout() {
-        let items = this._items();
-        let byId = new Map(items.map(i => [i.id, i]));
-        let entries = this._entries(items);
+    // lots of things can change at once (startup, an app adding three icons), do it once
+    _queueRelayout() {
+        if (this._relayoutId)
+            return;
+        this._relayoutId = GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+            this._relayoutId = 0;
+            this._relayout();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
 
-        let xapp = AppletManager.getRunningInstancesForUuid(XAPP_UUID).find(a => a.panel === this.panel);
-        if (xapp)
-            xapp.actor.visible = false;
+    _relayout() {
+        if (this._relayoutId) {
+            GLib.source_remove(this._relayoutId);
+            this._relayoutId = 0;
+        }
+        let items = this._items();
+        let entries = this._entries(items);
+        // an app can have two icons with the same name, both get the same treatment
+        let byId = new Map();
+        for (let item of items) {
+            if (!byId.has(item.id))
+                byId.set(item.id, []);
+            byId.get(item.id).push(item);
+        }
 
         let wasOpen = this.menu.isOpen;
         this._returnApplets();
+        this._hiddenApplets.clear();
 
-        for (let icon of this._xappIcons.values()) {
-            let parent = icon.actor.get_parent();
-            if (parent)
-                parent.remove_child(icon.actor);
-            this._setCellLook(icon.actor, false);
-            icon.inPopup = false;
+        // the stock tray would show the same icons again
+        let xappApplet = this._appletFor(XAPP_UUID);
+        if (xappApplet) {
+            this._watchApplet(xappApplet);
+            this._hiddenApplets.add(xappApplet);
+            xappApplet.actor.visible = false;
         }
 
         let panelSize = (icon) => this.getPanelIconSize(
             (icon.proxy.icon_name || "").includes("symbolic") ? St.IconType.SYMBOLIC : St.IconType.FULLCOLOR);
 
+        let left = [], right = [];
         this._popupItems = [];
-        this._hiddenApplets.clear();
-        for (let entry of entries) {
-            let item = byId.get(entry.name);
-            if (!item)
-                continue;
+        let place = (item, entry) => {
             let onPanel = entry.show && entry.pinned;
-
             if (item.xapp) {
                 if (onPanel) {
-                    item.xapp.setSize(panelSize(item.xapp));
-                    (entry.right ? this._pinnedRight : this._pinnedLeft).add_actor(item.xapp.actor);
+                    item.xapp.setPlacement(false, panelSize(item.xapp));
+                    (entry.right ? right : left).push(item.xapp.actor);
                 } else if (entry.show) {
-                    item.xapp.setSize(this.iconSize);
+                    item.xapp.setPlacement(true, this.iconSize);
                     this._popupItems.push(item);
                 }
-                continue;
+                return;
             }
-
             let applet = item.applet;
             this._watchApplet(applet);
             if (onPanel) {
@@ -365,10 +471,49 @@ class TrayCollapseApplet extends Applet.Applet {
                 if (entry.show)
                     this._popupItems.push(item);
             }
+        };
+        for (let entry of entries)
+            for (let item of byId.get(entry.name) || [])
+                place(item, entry);
+        // nothing stable to remember it by yet: just show it in the pop-up
+        for (let item of byId.get(null) || [])
+            place(item, { show: true, pinned: false, right: false });
+
+        // pinned icons: only touch the panel if something actually moved
+        this._syncBox(this._pinnedLeft, left);
+        this._syncBox(this._pinnedRight, right);
+        let pinned = new Set([...left, ...right]);
+        let inPopup = new Set(this._popupItems.filter(i => i.xapp).map(i => i.xapp.actor));
+        for (let icon of this._xappIcons.values()) {
+            let parent = icon.actor.get_parent();
+            // hidden ones, and ones that just left a pinned box
+            if (!pinned.has(icon.actor) && !inPopup.has(icon.actor) && parent)
+                parent.remove_child(icon.actor);
+            if (!inPopup.has(icon.actor))
+                this._setCellLook(icon.actor, false);
         }
 
         if (wasOpen)
             this._fillPopup();
+    }
+
+    _syncBox(box, actors) {
+        let current = box.get_children();
+        if (current.length === actors.length && current.every((a, i) => a === actors[i]))
+            return;
+        for (let child of current)
+            if (!actors.includes(child))
+                box.remove_child(child);
+        actors.forEach((actor, i) => {
+            let parent = actor.get_parent();
+            if (parent !== box) {
+                if (parent)
+                    parent.remove_child(actor);
+                box.insert_child_at_index(actor, i);
+            } else {
+                box.set_child_at_index(actor, i);
+            }
+        });
     }
 
     // some applets show themselves (gpaste does when its shortcut opens its menu).
@@ -395,7 +540,7 @@ class TrayCollapseApplet extends Applet.Applet {
             this._enforceId = 0;
             for (let applet of this._hiddenApplets) {
                 let actor = applet.actor;
-                if (actor.is_finalized() || actor.get_parent() !== applet._panelLocation)
+                if (actor.is_finalized() || !applet._panelLocation || actor.get_parent() !== applet._panelLocation)
                     continue;
                 if (actor.visible && !(applet.menu && applet.menu.isOpen))
                     actor.visible = false;
@@ -404,12 +549,27 @@ class TrayCollapseApplet extends Applet.Applet {
         });
     }
 
-    _scheduleReapply() {
+    // tray applets on our panel that are set up but haven't loaded yet (slow login)
+    _trayAppletsMissing() {
+        let panelKey = "panel" + this.panel.panelId;
+        let wanted = [XAPP_UUID, ...Object.values(APPLET_ITEMS)];
+        return global.settings.get_strv("enabled-applets").some(def => {
+            let [panel, , , uuid] = def.split(":");
+            return panel === panelKey && wanted.includes(uuid) && !this._appletFor(uuid);
+        });
+    }
+
+    _scheduleReapply(retry = false) {
         if (this._reapplyId)
             GLib.source_remove(this._reapplyId);
-        this._reapplyId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1500, () => {
+        if (!retry)
+            this._reapplyTries = 0;
+        this._reapplyId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, retry ? 2000 : 1500, () => {
             this._reapplyId = 0;
             this._relayout();
+            // keep checking for a bit, then give up (one may just be broken)
+            if (this._trayAppletsMissing() && ++this._reapplyTries < 10)
+                this._scheduleReapply(true);
             return GLib.SOURCE_REMOVE;
         });
     }
@@ -440,8 +600,13 @@ class TrayCollapseApplet extends Applet.Applet {
         let cells = [];
         for (let item of this._popupItems) {
             if (item.xapp) {
+                // removed since the last layout, the queued one will catch up
+                if (item.xapp.destroyed)
+                    continue;
+                let parent = item.xapp.actor.get_parent();
+                if (parent)
+                    parent.remove_child(item.xapp.actor);
                 this._setCellLook(item.xapp.actor, true);
-                item.xapp.inPopup = true;
                 cells.push(item.xapp.actor);
             } else {
                 let cell = this._borrowApplet(item.applet);
@@ -458,8 +623,8 @@ class TrayCollapseApplet extends Applet.Applet {
     }
 
     // panel -> pop-up. every pop-up icon gets the same cell: our size, our hover.
-    // an applet is put inside one and scaled so its icon matches the others.
-    // the only things changed on the applet are scale and its own hover, both reset on return
+    // an applet is put inside one and its icon redrawn at the pop-up size.
+    // only its icon size and own hover are changed, both put back on return
     _borrowApplet(applet) {
         let actor = applet.actor;
         let parent = actor.get_parent();
@@ -542,14 +707,17 @@ class TrayCollapseApplet extends Applet.Applet {
                 cell.set_child(null);
                 actor.set_scale(1, 1);
                 actor.track_hover = hadTrackHover;
+                // removed from the panel while it was in here: nowhere to go back to
                 let loc = applet._panelLocation;
-                let before = loc.get_children().find(x =>
-                    x._applet && x._applet instanceof Applet.Applet && applet._order < x._applet._order);
-                if (before)
-                    loc.insert_child_below(actor, before);
-                else
-                    loc.add_actor(actor);
-                actor.visible = !this._hiddenApplets.has(applet);
+                if (loc && !loc.is_finalized()) {
+                    let before = loc.get_children().find(x =>
+                        x._applet && x._applet instanceof Applet.Applet && applet._order < x._applet._order);
+                    if (before)
+                        loc.insert_child_below(actor, before);
+                    else
+                        loc.add_actor(actor);
+                    actor.visible = !this._hiddenApplets.has(applet);
+                }
             }
             cell.destroy();
         }
@@ -564,15 +732,34 @@ class TrayCollapseApplet extends Applet.Applet {
         if (open) {
             // keeps mouse events coming up here even after we let go of the grab
             Main.layoutManager.trackChrome(this.menu.actor, { affectsInputRegion: true });
-            this._grabbed = Main.pushModal(this.menu.actor);
             this._connectCloseSignals();
+            // something else may have the mouse right now (a drag, another app's menu)
+            if (!this._tryGrab())
+                this._startRegrab();
         } else {
             this._releaseGrab();
             Main.layoutManager.untrackChrome(this.menu.actor);
             this._disconnectCloseSignals();
             this._returnApplets();
+            // don't come back highlighted next time
+            for (let item of this._popupItems)
+                if (item.xapp && !item.xapp.destroyed)
+                    item.xapp.actor.hover = false;
         }
         this._updateArrow();
+    }
+
+    // grabbing fails while an app's own menu has the mouse. check quietly first,
+    // Main.pushModal logs an error every time it fails
+    _tryGrab() {
+        if (Main.modalCount === 0) {
+            let time = global.get_current_time();
+            if (!global.begin_modal(time, 0))
+                return false;
+            global.end_modal(time);
+        }
+        this._grabbed = Main.pushModal(this.menu.actor);
+        return this._grabbed;
     }
 
     _releaseGrab() {
@@ -585,20 +772,17 @@ class TrayCollapseApplet extends Applet.Applet {
 
     _afterIconClick() {
         this._lastIconClick = GLib.get_monotonic_time();
-        if (this.closeOnClick) {
+        if (this.closeOnClick)
             this.menu.close();
-            return;
-        }
-        // stay open. take the mouse back once the app is done with it: grabbing
-        // fails while the app's menu is up, so just keep trying until it works
+        else
+            this._startRegrab();
+    }
+
+    // stay open, and take the mouse back once whoever has it is done
+    _startRegrab() {
         this._stopRegrab();
         this._regrabId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 300, () => {
-            if (!this.menu.isOpen || this._grabbed) {
-                this._regrabId = 0;
-                return GLib.SOURCE_REMOVE;
-            }
-            this._grabbed = Main.pushModal(this.menu.actor);
-            if (this._grabbed) {
+            if (!this.menu.isOpen || this._grabbed || this._tryGrab()) {
                 this._regrabId = 0;
                 return GLib.SOURCE_REMOVE;
             }
@@ -624,12 +808,41 @@ class TrayCollapseApplet extends Applet.Applet {
         return false;
     }
 
+    // the click that closes the pop-up shouldn't also land on what's under it
+    // (the window list switches windows on release)
+    _swallowNextRelease() {
+        this._stopSwallow();
+        let id = global.stage.connect("captured-event", (actor, event) => {
+            if (event.type() !== Clutter.EventType.BUTTON_RELEASE)
+                return Clutter.EVENT_PROPAGATE;
+            this._stopSwallow();
+            return Clutter.EVENT_STOP;
+        });
+        let timeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 2000, () => {
+            this._swallow[1] = 0;
+            this._stopSwallow();
+            return GLib.SOURCE_REMOVE;
+        });
+        this._swallow = [id, timeout];
+    }
+
+    _stopSwallow() {
+        if (!this._swallow)
+            return;
+        let [id, timeout] = this._swallow;
+        global.stage.disconnect(id);
+        if (timeout)
+            GLib.source_remove(timeout);
+        this._swallow = null;
+    }
+
     _connectCloseSignals() {
         this._closeSignals = [
             [global.stage, global.stage.connect("captured-event", (actor, event) => {
                 let type = event.type();
                 if (type === Clutter.EventType.BUTTON_PRESS && !this._isInsideMenuOrSelf(event.get_source())) {
                     // like any other menu: a click outside just closes it
+                    this._swallowNextRelease();
                     this.menu.close();
                     return Clutter.EVENT_STOP;
                 }
@@ -653,6 +866,13 @@ class TrayCollapseApplet extends Applet.Applet {
         for (let [obj, id] of this._closeSignals)
             obj.disconnect(id);
         this._closeSignals = [];
+    }
+
+    _applyOrientation() {
+        let vertical = this._orientation === St.Side.LEFT || this._orientation === St.Side.RIGHT;
+        this.actor.vertical = vertical;
+        this._pinnedLeft.vertical = vertical;
+        this._pinnedRight.vertical = vertical;
     }
 
     _updateArrow() {
@@ -679,12 +899,15 @@ class TrayCollapseApplet extends Applet.Applet {
     // ---- applet hooks ----
 
     on_applet_clicked(event) {
+        if (this._inert)
+            return;
         // clicks on pinned icons land here too
         if (!this._arrow.contains(event.get_source()))
             return;
         if (this.menu.isOpen) {
             this.menu.close();
         } else {
+            this._relayout();
             this._fillPopup();
             this.menu.open();
         }
@@ -692,21 +915,30 @@ class TrayCollapseApplet extends Applet.Applet {
 
     on_orientation_changed(orientation) {
         this._orientation = orientation;
+        if (this._inert)
+            return;
         this.menu.close();
+        this._applyOrientation();
         this._updateArrow();
-        this._relayout();
+        this._queueRelayout();
     }
 
     on_panel_height_changed() {
+        if (this._inert)
+            return;
         this._updateArrow();
-        this._relayout();
+        this._queueRelayout();
     }
 
     on_applet_removed_from_panel() {
+        if (this._inert)
+            return;
         this.menu.close();
-        for (let id of [this._reapplyId, this._enforceId, this._regrabId])
+        this._stopSwallow();
+        for (let id of [this._relayoutId, this._reapplyId, this._enforceId, this._regrabId])
             if (id)
                 GLib.source_remove(id);
+        this._relayoutId = this._reapplyId = this._enforceId = this._regrabId = 0;
         for (let [obj, id] of this._signals)
             obj.disconnect(id);
         for (let ids of this._watched.values())

@@ -42,14 +42,15 @@ if mode == "remove":
 if mine:
     sys.exit()  # already there
 
-# go just left of the tray if we can find it
+# go just left of the tray if we can find it, else the right side of a panel that exists
 tray = [e.split(":") for e in entries
         if e.split(":")[3] in ("xapp-status@cinnamon.org", "systray@cinnamon.org")]
 if tray:
     panel, zone = tray[0][0], tray[0][1]
     order = max(0, min(int(t[2]) for t in tray if t[:2] == [panel, zone]) - 1)
 else:
-    panel, zone, order = "panel1", "right", 0
+    panels = sorted({e.split(":")[0] for e in entries}) or ["panel1"]
+    panel, zone, order = ("panel1" if "panel1" in panels else panels[0]), "right", 0
 next_id = max([int(e.split(":")[4]) for e in entries] + [0]) + 1
 entries.append(f"{panel}:{zone}:{order}:{uuid}:{next_id}")
 print(entries)
