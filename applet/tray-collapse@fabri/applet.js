@@ -176,6 +176,7 @@ class TrayCollapseApplet extends Applet.Applet {
         this._hiddenApplets = new Set();
         this._watched = new Map();     // applet -> signal ids
         this._popupItems = [];
+        this._origIconSize = new Map();  // applet icon -> its own size, while it's in the pop-up
 
         this.settings = new Settings.AppletSettings(this, metadata.uuid, instanceId);
         this.settings.bind("icon-size", "iconSize", () => this._relayout());
@@ -418,13 +419,14 @@ class TrayCollapseApplet extends Applet.Applet {
     }
 
     _setCellLook(actor, inPopup) {
+        // same fixed square for every pop-up icon
         if (inPopup) {
             let s = this._cellSize();
             actor.add_style_class_name("tray-collapse-cell");
-            actor.set_style(`min-width: ${s}px; min-height: ${s}px;`);
+            actor.set_size(s, s);
         } else {
             actor.remove_style_class_name("tray-collapse-cell");
-            actor.set_style(null);
+            actor.set_size(-1, -1);
         }
     }
 
@@ -455,8 +457,9 @@ class TrayCollapseApplet extends Applet.Applet {
         this._emptyLabel.visible = cells.length === 0;
     }
 
-    // panel -> pop-up. the applet goes inside a cell of ours and only gets scaled,
-    // nothing of its own is touched, so there's nothing to restore wrong later
+    // panel -> pop-up. every pop-up icon gets the same cell: our size, our hover.
+    // an applet is put inside one and scaled so its icon matches the others.
+    // the only things changed on the applet are scale and its own hover, both reset on return
     _borrowApplet(applet) {
         let actor = applet.actor;
         let parent = actor.get_parent();
@@ -464,46 +467,81 @@ class TrayCollapseApplet extends Applet.Applet {
         if (parent && parent !== applet._panelLocation)
             return null;
 
-        let isTray = !actor.has_style_class_name("applet-box");
-        if (isTray) {
-            // old-style tray: a box of icons, only worth showing if it has any
-            let [, natW] = actor.get_preferred_width(-1);
-            if (natW <= 0)
-                return null;
-        }
+        // old-style tray: a box of icons, only worth showing if it has any
+        let [, natW] = actor.get_preferred_width(-1);
+        let [, natH] = actor.get_preferred_height(-1);
+        if (natW <= 0 || natH <= 0)
+            return null;
 
         if (parent)
             parent.remove_actor(actor);
 
+        let isTray = !actor.has_style_class_name("applet-box");
         let cell = new St.Bin({
-            track_hover: true,
+            reactive: true, track_hover: true,
             x_align: St.Align.MIDDLE, y_align: St.Align.MIDDLE,
             x_fill: false, y_fill: false,
         });
         cell.set_clip_to_allocation(true);
+        cell.set_child(actor);
+
+        // one highlight per icon: ours
+        let hadTrackHover = actor.track_hover;
+        actor.track_hover = false;
+        actor.hover = false;
+
         if (isTray) {
+            // a group of icons, can't be squeezed into one square
             cell.add_style_class_name("tray-collapse-cell");
         } else {
             this._setCellLook(cell, true);
-            let s = this._cellSize();
-            cell.set_size(s, s);
-            let scale = this.iconSize / this.getPanelIconSize(St.IconType.FULLCOLOR);
-            actor.set_pivot_point(0.5, 0.5);
-            actor.set_scale(scale, scale);
+            let icon = this._appletIcon(applet);
+            if (icon) {
+                // redraw its icon at our size so it's as sharp as the others.
+                // the original is only saved once, so a missed return can't save our size
+                if (!this._origIconSize.has(icon))
+                    this._origIconSize.set(icon, icon.icon_size);
+                icon.icon_size = this.iconSize;
+            } else {
+                // no icon (text applet)? shrink the whole thing to fit
+                let scale = Math.min(1, this._cellSize() / natW, this._cellSize() / natH);
+                actor.set_pivot_point(0.5, 0.5);
+                actor.set_scale(scale, scale);
+            }
+            // clicks on the empty part of the cell count too, like the app icons
+            cell.connect("button-press-event", (a, event) =>
+                event.get_source() === cell ? applet._onButtonPressEvent(actor, event) : Clutter.EVENT_PROPAGATE);
         }
-        cell.set_child(actor);
         actor.visible = true;
-        this._borrowed.push([applet, cell]);
+        this._borrowed.push([applet, cell, hadTrackHover]);
         return cell;
+    }
+
+    // the applet's own icon, if it has one
+    _appletIcon(applet) {
+        if (applet._applet_icon instanceof St.Icon)
+            return applet._applet_icon;
+        let find = (a) => {
+            if (a instanceof St.Icon)
+                return a;
+            for (let c of a.get_children()) {
+                let found = find(c);
+                if (found)
+                    return found;
+            }
+            return null;
+        };
+        return find(applet.actor);
     }
 
     // pop-up -> back to the same spot on the panel
     _returnApplets() {
-        for (let [applet, cell] of this._borrowed) {
+        for (let [applet, cell, hadTrackHover] of this._borrowed) {
             let actor = applet.actor;
             if (!actor.is_finalized() && actor.get_parent() === cell) {
                 cell.set_child(null);
                 actor.set_scale(1, 1);
+                actor.track_hover = hadTrackHover;
                 let loc = applet._panelLocation;
                 let before = loc.get_children().find(x =>
                     x._applet && x._applet instanceof Applet.Applet && applet._order < x._applet._order);
@@ -516,6 +554,10 @@ class TrayCollapseApplet extends Applet.Applet {
             cell.destroy();
         }
         this._borrowed = [];
+        for (let [icon, size] of this._origIconSize)
+            if (!icon.is_finalized())
+                icon.icon_size = size;
+        this._origIconSize.clear();
     }
 
     _onOpenStateChanged(open) {
