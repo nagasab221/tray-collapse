@@ -15,6 +15,9 @@ curl -fsSL https://raw.githubusercontent.com/nagasab221/tray-collapse/main/insta
 No sudo needed. It drops the arrow right next to your tray. Run the same command again
 to update.
 
+Works over SSH too, as long as you're logged into Cinnamon on that machine. If nobody's
+logged in, it still installs and the arrow shows up at the next login.
+
 You can also clone the repo and run `./install.sh` yourself.
 
 ## Uninstall
