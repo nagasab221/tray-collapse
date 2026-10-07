@@ -3,7 +3,7 @@
     spacing: 4px;
 }
 
-/* Every tray icon gets the same square cell, centered, with a fading hover highlight. */
+/* icon boxes + hover fade */
 .tray-collapse-box .tray-collapse-cell {
     min-width: 36px;
     min-height: 36px;

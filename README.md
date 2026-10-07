@@ -1,30 +1,34 @@
-# Tray Collapse
+# tray-collapse
 
-Windows-style "show hidden icons" arrow for the Cinnamon panel (Linux Mint). The tray icons
-(xapp-status, legacy systray, and GPaste Reloaded if present) are hidden from the panel and
-shown in a pop-up above the arrow.
+I missed the little "show hidden icons" arrow from Windows, so I made one for Cinnamon.
 
-## Install / update
+It hides your tray icons from the panel and puts them in a small pop-up that opens when
+you click the arrow. Works with the normal tray icons (Steam, Telegram, Discord etc.),
+old-style tray icons, and GPaste if you have it.
 
-One command (Linux Mint / Cinnamon, no sudo):
+## Install
 
-    curl -fsSL https://raw.githubusercontent.com/nagasab221/tray-collapse/main/install.sh | bash
+```
+curl -fsSL https://raw.githubusercontent.com/nagasab221/tray-collapse/main/install.sh | bash
+```
 
-Or from a clone / extracted download:
+No sudo needed. It drops the arrow right next to your tray. Run the same command again
+to update.
 
-    ./install.sh
+You can also clone the repo and run `./install.sh` yourself.
 
-Copies the applet to `~/.local/share/cinnamon/applets/` and adds it just left of the system
-tray. Running it again updates the files and reloads the applet. Per user, no sudo needed.
+## Uninstall
 
-## Remove
+```
+curl -fsSL https://raw.githubusercontent.com/nagasab221/tray-collapse/main/install.sh | bash -s -- --remove
+```
 
-    curl -fsSL https://raw.githubusercontent.com/nagasab221/tray-collapse/main/install.sh | bash -s -- --remove
+or `./install.sh --remove`. Your tray icons go back to normal.
 
-or `./install.sh --remove`.
+## Tweaking
 
-## Notes
+- Want another applet in the pop-up? Add its uuid to `TARGET_UUIDS` at the top of `applet.js`.
+- Icon size, hover color, fade speed are in `stylesheet.css`.
 
-- Tested on Linux Mint 22.3, Cinnamon 6.6.
-- Which applets go in the pop-up: `TARGET_UUIDS` at the top of `applet.js`.
-- Look (cell size, hover fade): `stylesheet.css`.
+Tested on Linux Mint 22.3 with Cinnamon 6.6. Should work on other Cinnamon setups but
+I haven't tried.

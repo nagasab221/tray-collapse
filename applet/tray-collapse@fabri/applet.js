@@ -5,10 +5,10 @@ const Clutter = imports.gi.Clutter;
 const St = imports.gi.St;
 const GLib = imports.gi.GLib;
 
-// Applets that live in the pop-up instead of the panel.
+// applets that go in the pop-up
 const TARGET_UUIDS = ["gpaste-reloaded@feuerfuchs.eu", "xapp-status@cinnamon.org", "systray@cinnamon.org"];
 
-// Child properties changed while an icon sits in the pop-up, restored when it goes back.
+// stuff we change on icons while they're in the pop-up (put back on close)
 const CELL_PROPS = ["x_expand", "y_expand", "x_align", "y_align", "x_fill", "y_fill"];
 
 class TrayCollapseApplet extends Applet.IconApplet {
@@ -20,15 +20,14 @@ class TrayCollapseApplet extends Applet.IconApplet {
         this._cells = new Map();
         this._closeSignals = [];
 
-        // No PopupMenuManager on purpose: its modal grab would swallow clicks on the
-        // menus the tray icons themselves open. Closing is handled in _connectCloseSignals.
+        // no PopupMenuManager here, its grab breaks the icons' own right-click menus
         this.menu = new Applet.AppletPopupMenu(this, orientation);
         this.menu.connect("open-state-changed", (menu, open) => this._onOpenStateChanged(open));
 
         this._trayBox = new St.BoxLayout({ vertical: false, style_class: "tray-collapse-box" });
         this.menu.box.add_actor(this._trayBox);
 
-        // Other applets may load (or reload) after us; hide them again when the layout changes.
+        // tray applets can load after us, so hide them again when the panel changes
         this._settingsIds = [
             global.settings.connect("changed::enabled-applets", () => { this.menu.close(); this._scheduleReapply(); }),
             global.settings.connect("changed::panel-edit-mode", () => this.menu.close()),
@@ -63,7 +62,7 @@ class TrayCollapseApplet extends Applet.IconApplet {
                 applet.actor.visible = visible;
     }
 
-    // Move the target applets from their panel slot into the pop-up.
+    // panel -> pop-up
     _moveIntoPopup() {
         for (let applet of this._targets()) {
             if (applet.actor.get_parent() !== applet._panelLocation)
@@ -76,7 +75,7 @@ class TrayCollapseApplet extends Applet.IconApplet {
         this._decorateCells();
     }
 
-    // Each tray icon is an "applet-box" (the applet itself, or one per icon in xapp-status/systray).
+    // every tray icon has the "applet-box" class
     _findCells(actor, depth = 0) {
         if (actor instanceof St.Widget && actor.has_style_class_name("applet-box"))
             return [actor];
@@ -85,7 +84,7 @@ class TrayCollapseApplet extends Applet.IconApplet {
         return actor.get_children().flatMap(c => this._findCells(c, depth + 1));
     }
 
-    // Give every icon the same square cell with its content centered; undone in _undecorateCells.
+    // same size box for every icon, centered
     _decorateCells() {
         for (let applet of this._moved) {
             for (let cell of this._findCells(applet.actor)) {
@@ -94,7 +93,7 @@ class TrayCollapseApplet extends Applet.IconApplet {
                 let saved = cell.get_children().map(c => [c, CELL_PROPS.map(prop => c[prop])]);
                 for (let [c] of saved) {
                     c.x_expand = c.y_expand = true;
-                    // St.Bin aligns its child with its own St.Align-typed x/y_align.
+                    // St.Bin uses St.Align, not Clutter.ActorAlign
                     if (c instanceof St.Bin) {
                         c.x_align = c.y_align = St.Align.MIDDLE;
                         c.x_fill = c.y_fill = false;
@@ -120,7 +119,7 @@ class TrayCollapseApplet extends Applet.IconApplet {
         this._cells.clear();
     }
 
-    // Put them back where appletManager would have placed them, hidden.
+    // pop-up -> back to the same spot on the panel
     _restoreToPanel() {
         this._undecorateCells();
         for (let applet of this._moved) {
@@ -141,8 +140,8 @@ class TrayCollapseApplet extends Applet.IconApplet {
 
     _onOpenStateChanged(open) {
         if (open) {
-            // Without a grab, X11 only delivers pointer motion (hover) to areas in Cinnamon's
-            // input region. Only tracked while open: hidden tracked actors still block clicks.
+            // without this hover doesn't work (no grab = no mouse events up here).
+            // has to be undone on close or it blocks clicks even when hidden
             Main.layoutManager.trackChrome(this.menu.actor, { affectsInputRegion: true });
             this._connectCloseSignals();
         } else {
@@ -157,7 +156,7 @@ class TrayCollapseApplet extends Applet.IconApplet {
         for (let a = actor; a; a = a.get_parent()) {
             if (a === this.actor || a === this.menu.actor)
                 return true;
-            // Menus opened by the tray icons themselves.
+            // an icon's own menu
             if (a instanceof St.Widget && a.has_style_class_name("menu"))
                 return true;
         }
@@ -174,7 +173,7 @@ class TrayCollapseApplet extends Applet.IconApplet {
                     this.menu.close();
                 return Clutter.EVENT_PROPAGATE;
             })],
-            // Clicking any window (or the desktop) focuses it; a null focus means a menu took a grab.
+            // clicked on a window or the desktop. null focus = some menu opened, ignore
             [global.display, global.display.connect("notify::focus-window", () => {
                 if (global.display.focus_window)
                     this.menu.close();
