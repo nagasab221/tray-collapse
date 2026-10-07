@@ -1,0 +1,25 @@
+.tray-collapse-box {
+    padding: 2px;
+    spacing: 4px;
+}
+
+/* Every tray icon gets the same square cell, centered, with a fading hover highlight. */
+.tray-collapse-box .tray-collapse-cell {
+    min-width: 36px;
+    min-height: 36px;
+    padding: 0;
+    margin: 0;
+    border-radius: 6px;
+    border: none;
+    background-color: rgba(127, 127, 127, 0);
+    transition-duration: 180ms;
+}
+
+.tray-collapse-box .tray-collapse-cell:hover {
+    background-color: rgba(127, 127, 127, 0.28);
+}
+
+.tray-collapse-box .tray-collapse-cell:active,
+.tray-collapse-box .tray-collapse-cell:checked {
+    background-color: rgba(127, 127, 127, 0.40);
+}

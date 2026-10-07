@@ -1,0 +1,7 @@
+{
+    "uuid": "tray-collapse@fabri",
+    "name": "Tray Collapse",
+    "description": "Windows-style arrow that moves the system tray icons into a pop-up above the panel",
+    "version": "2.1",
+    "max-instances": -1
+}
