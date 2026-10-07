@@ -28,6 +28,12 @@
         "dependency": "!one-row",
         "tooltip": "3 gives you a 3×3 grid, 4 a 3×4 and so on. Rows get added as needed."
     },
+    "close-on-click": {
+        "type": "switch",
+        "default": false,
+        "description": "Close the pop-up after clicking an icon",
+        "tooltip": "Off: the pop-up stays open while you use an icon or its menu, click outside to close it."
+    },
     "head-icons": {
         "type": "header",
         "description": "Icons"
@@ -36,12 +42,34 @@
         "type": "list",
         "description": "Icons",
         "height": 260,
-        "hidden-buttons": ["+", "edit"],
+        "hidden-buttons": [
+            "+",
+            "edit"
+        ],
         "columns": [
-            { "id": "name", "title": "Icon", "type": "string" },
-            { "id": "show", "title": "Show", "type": "boolean", "default": true },
-            { "id": "pinned", "title": "Pin to panel", "type": "boolean", "default": false },
-            { "id": "right", "title": "Right of the arrow", "type": "boolean", "default": false }
+            {
+                "id": "name",
+                "title": "Icon",
+                "type": "string"
+            },
+            {
+                "id": "show",
+                "title": "Show",
+                "type": "boolean",
+                "default": true
+            },
+            {
+                "id": "pinned",
+                "title": "Pin to panel",
+                "type": "boolean",
+                "default": false
+            },
+            {
+                "id": "right",
+                "title": "Right of the arrow",
+                "type": "boolean",
+                "default": false
+            }
         ],
         "default": []
     },

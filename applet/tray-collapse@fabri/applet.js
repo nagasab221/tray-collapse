@@ -136,7 +136,7 @@ class XAppIcon {
         } else {
             this.proxy.call_button_release(x, y, event.get_button(), event.get_time(), o, null, null);
             if (this.inPopup)
-                this.owner.menu.close();
+                this.owner._afterIconClick();
         }
         return Clutter.EVENT_STOP;
     }
@@ -167,6 +167,8 @@ class TrayCollapseApplet extends Applet.Applet {
         this._orientation = orientation;
         this._reapplyId = 0;
         this._enforceId = 0;
+        this._regrabId = 0;
+        this._lastIconClick = 0;
         this._grabbed = false;
         this._closeSignals = [];
         this._xappIcons = new Map();   // key: bus name + path
@@ -180,6 +182,7 @@ class TrayCollapseApplet extends Applet.Applet {
         this.settings.bind("one-row", "oneRow", () => this._relayout());
         this.settings.bind("columns", "columns", () => this._relayout());
         this.settings.bind("icons", "iconList", () => this._relayout());
+        this.settings.bind("close-on-click", "closeOnClick");
 
         // panel: [pinned left][arrow][pinned right]
         this.actor.remove_style_class_name("applet-box");
@@ -374,7 +377,11 @@ class TrayCollapseApplet extends Applet.Applet {
             return;
         let ids = [[applet.actor, applet.actor.connect("notify::visible", () => this._queueEnforce())]];
         if (applet.menu && applet.menu.connect)
-            ids.push([applet.menu, applet.menu.connect("open-state-changed", () => this._queueEnforce())]);
+            ids.push([applet.menu, applet.menu.connect("open-state-changed", (m, open) => {
+                this._queueEnforce();
+                if (!open && this.closeOnClick && this.menu.isOpen && this._borrowed.some(([a]) => a === applet))
+                    this.menu.close();
+            })]);
         ids.push([applet.actor, applet.actor.connect("destroy", () => this._watched.delete(applet))]);
         this._watched.set(applet, ids);
     }
@@ -527,9 +534,40 @@ class TrayCollapseApplet extends Applet.Applet {
     }
 
     _releaseGrab() {
+        this._stopRegrab();
         if (this._grabbed) {
             this._grabbed = false;
             Main.popModal(this.menu.actor);
+        }
+    }
+
+    _afterIconClick() {
+        this._lastIconClick = GLib.get_monotonic_time();
+        if (this.closeOnClick) {
+            this.menu.close();
+            return;
+        }
+        // stay open. take the mouse back once the app is done with it: grabbing
+        // fails while the app's menu is up, so just keep trying until it works
+        this._stopRegrab();
+        this._regrabId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 300, () => {
+            if (!this.menu.isOpen || this._grabbed) {
+                this._regrabId = 0;
+                return GLib.SOURCE_REMOVE;
+            }
+            this._grabbed = Main.pushModal(this.menu.actor);
+            if (this._grabbed) {
+                this._regrabId = 0;
+                return GLib.SOURCE_REMOVE;
+            }
+            return GLib.SOURCE_CONTINUE;
+        });
+    }
+
+    _stopRegrab() {
+        if (this._regrabId) {
+            GLib.source_remove(this._regrabId);
+            this._regrabId = 0;
         }
     }
 
@@ -559,9 +597,11 @@ class TrayCollapseApplet extends Applet.Applet {
                 }
                 return Clutter.EVENT_PROPAGATE;
             })],
-            // backup for when we let go of the grab for an app menu
+            // backup for when we let go of the grab for an app menu.
+            // right after an icon click the app itself may grab focus, ignore that
             [global.display, global.display.connect("notify::focus-window", () => {
-                if (!this._grabbed && global.display.focus_window)
+                let recent = GLib.get_monotonic_time() - this._lastIconClick < 1500000;
+                if (!this._grabbed && global.display.focus_window && (this.closeOnClick || !recent))
                     this.menu.close();
             })],
         ];
@@ -622,7 +662,7 @@ class TrayCollapseApplet extends Applet.Applet {
 
     on_applet_removed_from_panel() {
         this.menu.close();
-        for (let id of [this._reapplyId, this._enforceId])
+        for (let id of [this._reapplyId, this._enforceId, this._regrabId])
             if (id)
                 GLib.source_remove(id);
         for (let [obj, id] of this._signals)

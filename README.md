@@ -34,6 +34,8 @@ Right-click the arrow and hit Configure. You can:
 - tick boxes per icon: untick Show to hide it completely, tick Pin to panel to keep it
   out of the pop-up, and Right of the arrow to put it on the other side
 - reorder icons with the arrows
+- choose whether the pop-up closes after you click an icon, or stays open until you
+  click somewhere else (stays open by default)
 
 New icons show up in the list by themselves the first time an app puts one in the tray.
 
