@@ -19,9 +19,6 @@ const APPLET_ITEMS = {
     "old-style tray icons": "systray@cinnamon.org",
 };
 
-// stuff we change on applet icons while they're in the pop-up (put back on close)
-const CELL_PROPS = ["x_expand", "y_expand", "x_align", "y_align", "x_fill", "y_fill"];
-
 const CELL_PADDING = 14;
 
 // one icon from XApp.StatusIconMonitor (steam, telegram, nm-applet etc)
@@ -31,6 +28,7 @@ class XAppIcon {
         this.proxy = proxy;
         this.id = proxy.name.toLowerCase();
         this.size = 16;
+        this.inPopup = false;
         this._loadHandle = null;
 
         this.actor = new St.BoxLayout({
@@ -38,6 +36,8 @@ class XAppIcon {
             reactive: !global.settings.get_boolean("panel-edit-mode"),
             track_hover: true,
         });
+        // whatever the app sends, it can't grow past its box
+        this.actor.set_clip_to_allocation(true);
         this._holder = new St.Bin({
             x_expand: true, y_expand: true,
             x_align: St.Align.MIDDLE, y_align: St.Align.MIDDLE,
@@ -85,10 +85,11 @@ class XAppIcon {
         let symbolic = name.includes("symbolic");
         this.proxy.icon_size = this.size;
 
-        // some apps (steam...) hand us a png path instead of a theme icon
+        // some apps (steam...) hand us a png path instead of a theme icon.
+        // load it into a size x size square so a huge image can't blow up the panel
         if (name.includes("/") && !symbolic) {
             this._loadHandle = St.TextureCache.get_default().load_image_from_file_async(
-                name, -1, this.size, (cache, handle, actor) => {
+                name, this.size, this.size, (cache, handle, actor) => {
                     if (handle === this._loadHandle)
                         this._holder.child = actor;
                 });
@@ -127,10 +128,16 @@ class XAppIcon {
             return Clutter.EVENT_PROPAGATE;
         this._tooltip.hide();
         let [x, y, o] = this._position();
-        if (pressed)
+        if (pressed) {
+            // the app's own menu needs the mouse, so let go of ours first
+            if (this.inPopup)
+                this.owner._releaseGrab();
             this.proxy.call_button_press(x, y, event.get_button(), event.get_time(), o, null, null);
-        else
+        } else {
             this.proxy.call_button_release(x, y, event.get_button(), event.get_time(), o, null, null);
+            if (this.inPopup)
+                this.owner.menu.close();
+        }
         return Clutter.EVENT_STOP;
     }
 
@@ -159,29 +166,37 @@ class TrayCollapseApplet extends Applet.Applet {
         super(orientation, panelHeight, instanceId);
         this._orientation = orientation;
         this._reapplyId = 0;
+        this._enforceId = 0;
+        this._grabbed = false;
         this._closeSignals = [];
         this._xappIcons = new Map();   // key: bus name + path
-        this._movedApplets = [];
-        this._saved = new Map();
+        this._borrowed = [];           // [applet, cell] currently in the pop-up
+        this._hiddenApplets = new Set();
+        this._watched = new Map();     // applet -> signal ids
+        this._popupItems = [];
 
         this.settings = new Settings.AppletSettings(this, metadata.uuid, instanceId);
         this.settings.bind("icon-size", "iconSize", () => this._relayout());
+        this.settings.bind("one-row", "oneRow", () => this._relayout());
         this.settings.bind("columns", "columns", () => this._relayout());
         this.settings.bind("icons", "iconList", () => this._relayout());
 
-        // panel: [pinned icons][arrow]
+        // panel: [pinned left][arrow][pinned right]
         this.actor.remove_style_class_name("applet-box");
-        this._pinnedBox = new St.BoxLayout();
+        this._pinnedLeft = new St.BoxLayout();
+        this._pinnedRight = new St.BoxLayout();
         this._arrow = new St.BoxLayout({ style_class: "applet-box", reactive: true, track_hover: true });
         this._arrowIcon = new St.Icon({ icon_type: St.IconType.SYMBOLIC, style_class: "applet-icon" });
         this._arrow.add_actor(this._arrowIcon);
-        this.actor.add_actor(this._pinnedBox);
+        this.actor.add_actor(this._pinnedLeft);
         this.actor.add_actor(this._arrow);
+        this.actor.add_actor(this._pinnedRight);
         this._arrowTooltip = new Tooltips.Tooltip(this._arrow, _("Show hidden icons"));
         // the arrow has its own tooltip, the pinned icons have theirs
         this._applet_tooltip.preventShow = true;
 
-        // no PopupMenuManager here, its grab breaks the icons' own right-click menus
+        // no PopupMenuManager: we grab the mouse ourselves so we can let go
+        // when an app icon needs to open its own menu
         this.menu = new Applet.AppletPopupMenu(this, orientation);
         this.menu.connect("open-state-changed", (menu, open) => this._onOpenStateChanged(open));
         this._grid = new Clutter.GridLayout({ column_spacing: 4, row_spacing: 4 });
@@ -255,19 +270,32 @@ class TrayCollapseApplet extends Applet.Applet {
         return items;
     }
 
-    // settings list, with anything new added at the end
+    // settings list, with anything new added at the end. only writes when something changed,
+    // a write while the settings window is open makes it refresh
     _entries(items) {
-        let list = Array.isArray(this.iconList) ? this.iconList.slice() : [];
+        let changed = false;
+        let list = (Array.isArray(this.iconList) ? this.iconList : []).map(e => {
+            // 3.0 had a single "where" field
+            if (e.where !== undefined || e.show === undefined) {
+                changed = true;
+                return {
+                    name: e.name,
+                    show: e.where !== "hidden",
+                    pinned: e.where === "panel" || e.where === "panel-right" || !!e.pinned,
+                    right: e.where === "panel-right" || !!e.right,
+                };
+            }
+            return e;
+        });
         let known = new Set(list.map(e => e.name));
-        let added = false;
         for (let item of items) {
             if (!known.has(item.id)) {
-                list.push({ name: item.id, where: "popup" });
+                list.push({ name: item.id, show: true, pinned: false, right: false });
                 known.add(item.id);
-                added = true;
+                changed = true;
             }
         }
-        if (added)
+        if (changed)
             this.settings.setValue("icons", list);
         return list;
     }
@@ -284,29 +312,32 @@ class TrayCollapseApplet extends Applet.Applet {
             xapp.actor.visible = false;
 
         let wasOpen = this.menu.isOpen;
+        this._returnApplets();
 
         for (let icon of this._xappIcons.values()) {
             let parent = icon.actor.get_parent();
             if (parent)
                 parent.remove_child(icon.actor);
             this._setCellLook(icon.actor, false);
+            icon.inPopup = false;
         }
 
         let panelSize = (icon) => this.getPanelIconSize(
             (icon.proxy.icon_name || "").includes("symbolic") ? St.IconType.SYMBOLIC : St.IconType.FULLCOLOR);
 
         this._popupItems = [];
+        this._hiddenApplets.clear();
         for (let entry of entries) {
             let item = byId.get(entry.name);
             if (!item)
                 continue;
-            let where = entry.where || "popup";
+            let onPanel = entry.show && entry.pinned;
 
             if (item.xapp) {
-                if (where === "panel") {
+                if (onPanel) {
                     item.xapp.setSize(panelSize(item.xapp));
-                    this._pinnedBox.add_actor(item.xapp.actor);
-                } else if (where === "popup") {
+                    (entry.right ? this._pinnedRight : this._pinnedLeft).add_actor(item.xapp.actor);
+                } else if (entry.show) {
                     item.xapp.setSize(this.iconSize);
                     this._popupItems.push(item);
                 }
@@ -314,20 +345,55 @@ class TrayCollapseApplet extends Applet.Applet {
             }
 
             let applet = item.applet;
-            if (where === "panel") {
+            this._watchApplet(applet);
+            if (onPanel) {
                 applet.actor.visible = true;
                 let loc = applet._panelLocation;
-                if (applet.actor.get_parent() === loc && this.actor.get_parent() === loc)
-                    loc.set_child_below_sibling(applet.actor, this.actor);
+                if (applet.actor.get_parent() === loc && this.actor.get_parent() === loc) {
+                    if (entry.right)
+                        loc.set_child_above_sibling(applet.actor, this.actor);
+                    else
+                        loc.set_child_below_sibling(applet.actor, this.actor);
+                }
             } else {
+                this._hiddenApplets.add(applet);
                 applet.actor.visible = false;
-                if (where === "popup")
+                if (entry.show)
                     this._popupItems.push(item);
             }
         }
 
         if (wasOpen)
             this._fillPopup();
+    }
+
+    // some applets show themselves (gpaste does when its shortcut opens its menu).
+    // fine while their menu is open, after that they go back to hidden
+    _watchApplet(applet) {
+        if (this._watched.has(applet))
+            return;
+        let ids = [[applet.actor, applet.actor.connect("notify::visible", () => this._queueEnforce())]];
+        if (applet.menu && applet.menu.connect)
+            ids.push([applet.menu, applet.menu.connect("open-state-changed", () => this._queueEnforce())]);
+        ids.push([applet.actor, applet.actor.connect("destroy", () => this._watched.delete(applet))]);
+        this._watched.set(applet, ids);
+    }
+
+    _queueEnforce() {
+        if (this._enforceId)
+            return;
+        // after the applet's own handlers are done
+        this._enforceId = GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+            this._enforceId = 0;
+            for (let applet of this._hiddenApplets) {
+                let actor = applet.actor;
+                if (actor.is_finalized() || actor.get_parent() !== applet._panelLocation)
+                    continue;
+                if (actor.visible && !(applet.menu && applet.menu.isOpen))
+                    actor.visible = false;
+            }
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     _scheduleReapply() {
@@ -340,15 +406,15 @@ class TrayCollapseApplet extends Applet.Applet {
         });
     }
 
-    _cellStyle() {
-        let s = this.iconSize + CELL_PADDING;
-        return `min-width: ${s}px; min-height: ${s}px;`;
+    _cellSize() {
+        return this.iconSize + CELL_PADDING;
     }
 
     _setCellLook(actor, inPopup) {
         if (inPopup) {
+            let s = this._cellSize();
             actor.add_style_class_name("tray-collapse-cell");
-            actor.set_style(this._cellStyle());
+            actor.set_style(`min-width: ${s}px; min-height: ${s}px;`);
         } else {
             actor.remove_style_class_name("tray-collapse-cell");
             actor.set_style(null);
@@ -358,110 +424,101 @@ class TrayCollapseApplet extends Applet.Applet {
     // ---- pop-up ----
 
     _fillPopup() {
-        // applets go back to the panel first, or clearing the grid would orphan them
         this._returnApplets();
         for (let child of this._gridBox.get_children())
             this._gridBox.remove_child(child);
 
         let cells = [];
-        for (let item of this._popupItems || []) {
+        for (let item of this._popupItems) {
             if (item.xapp) {
                 this._setCellLook(item.xapp.actor, true);
+                item.xapp.inPopup = true;
                 cells.push(item.xapp.actor);
             } else {
-                cells.push(...this._borrowApplet(item.applet));
+                let cell = this._borrowApplet(item.applet);
+                if (cell)
+                    cells.push(cell);
             }
         }
 
-        let cols = this.columns > 0 ? this.columns : Math.max(cells.length, 1);
+        let cols = this.oneRow ? Math.max(cells.length, 1) : Math.max(this.columns, 1);
         cells.forEach((cell, i) => this._grid.attach(cell, i % cols, Math.floor(i / cols), 1, 1));
 
         this._gridBox.visible = cells.length > 0;
         this._emptyLabel.visible = cells.length === 0;
     }
 
-    // panel -> pop-up. returns the actor to put in the grid (or nothing if it's empty)
+    // panel -> pop-up. the applet goes inside a cell of ours and only gets scaled,
+    // nothing of its own is touched, so there's nothing to restore wrong later
     _borrowApplet(applet) {
         let actor = applet.actor;
         let parent = actor.get_parent();
         // no parent = got orphaned somehow, just take it
         if (parent && parent !== applet._panelLocation)
-            return [];
-        if (parent)
-            parent.remove_actor(actor);
-        actor.visible = true;
-        this._movedApplets.push(applet);
+            return null;
 
-        let cell = actor.has_style_class_name("applet-box") ? actor : null;
-        if (!cell) {
+        let isTray = !actor.has_style_class_name("applet-box");
+        if (isTray) {
             // old-style tray: a box of icons, only worth showing if it has any
             let [, natW] = actor.get_preferred_width(-1);
-            return natW > 0 ? [actor] : [];
+            if (natW <= 0)
+                return null;
         }
 
-        let saved = { style: cell.get_style(), children: [], icons: [] };
-        for (let c of cell.get_children()) {
-            saved.children.push([c, CELL_PROPS.map(p => c[p])]);
-            c.x_expand = c.y_expand = true;
-            // St.Bin uses St.Align, not Clutter.ActorAlign
-            if (c instanceof St.Bin) {
-                c.x_align = c.y_align = St.Align.MIDDLE;
-                c.x_fill = c.y_fill = false;
-            } else {
-                c.x_align = c.y_align = Clutter.ActorAlign.CENTER;
-            }
+        if (parent)
+            parent.remove_actor(actor);
+
+        let cell = new St.Bin({
+            track_hover: true,
+            x_align: St.Align.MIDDLE, y_align: St.Align.MIDDLE,
+            x_fill: false, y_fill: false,
+        });
+        cell.set_clip_to_allocation(true);
+        if (isTray) {
+            cell.add_style_class_name("tray-collapse-cell");
+        } else {
+            this._setCellLook(cell, true);
+            let s = this._cellSize();
+            cell.set_size(s, s);
+            let scale = this.iconSize / this.getPanelIconSize(St.IconType.FULLCOLOR);
+            actor.set_pivot_point(0.5, 0.5);
+            actor.set_scale(scale, scale);
         }
-        let findIcons = (a) => a instanceof St.Icon ? [a] : a.get_children().flatMap(findIcons);
-        for (let icon of findIcons(cell)) {
-            saved.icons.push([icon, icon.icon_size]);
-            icon.icon_size = this.iconSize;
-        }
-        this._saved.set(cell, saved);
-        cell.add_style_class_name("tray-collapse-cell");
-        cell.set_style(this._cellStyle());
-        return [cell];
+        cell.set_child(actor);
+        actor.visible = true;
+        this._borrowed.push([applet, cell]);
+        return cell;
     }
 
     // pop-up -> back to the same spot on the panel
     _returnApplets() {
-        for (let applet of this._movedApplets) {
+        for (let [applet, cell] of this._borrowed) {
             let actor = applet.actor;
-            if (actor.is_finalized() || actor.get_parent() !== this._gridBox)
-                continue;
-
-            let saved = this._saved.get(actor);
-            if (saved) {
-                actor.remove_style_class_name("tray-collapse-cell");
-                actor.set_style(saved.style);
-                for (let [c, values] of saved.children)
-                    if (!c.is_finalized())
-                        CELL_PROPS.forEach((p, i) => { if (values[i] !== undefined) c[p] = values[i]; });
-                for (let [icon, size] of saved.icons)
-                    if (!icon.is_finalized())
-                        icon.icon_size = size;
-                this._saved.delete(actor);
+            if (!actor.is_finalized() && actor.get_parent() === cell) {
+                cell.set_child(null);
+                actor.set_scale(1, 1);
+                let loc = applet._panelLocation;
+                let before = loc.get_children().find(x =>
+                    x._applet && x._applet instanceof Applet.Applet && applet._order < x._applet._order);
+                if (before)
+                    loc.insert_child_below(actor, before);
+                else
+                    loc.add_actor(actor);
+                actor.visible = !this._hiddenApplets.has(applet);
             }
-
-            this._gridBox.remove_child(actor);
-            let loc = applet._panelLocation;
-            let before = loc.get_children().find(x =>
-                x._applet && x._applet instanceof Applet.Applet && applet._order < x._applet._order);
-            if (before)
-                loc.insert_child_below(actor, before);
-            else
-                loc.add_actor(actor);
-            actor.visible = false;
+            cell.destroy();
         }
-        this._movedApplets = [];
+        this._borrowed = [];
     }
 
     _onOpenStateChanged(open) {
         if (open) {
-            // without this hover doesn't work (no grab = no mouse events up here).
-            // has to be undone on close or it blocks clicks even when hidden
+            // keeps mouse events coming up here even after we let go of the grab
             Main.layoutManager.trackChrome(this.menu.actor, { affectsInputRegion: true });
+            this._grabbed = Main.pushModal(this.menu.actor);
             this._connectCloseSignals();
         } else {
+            this._releaseGrab();
             Main.layoutManager.untrackChrome(this.menu.actor);
             this._disconnectCloseSignals();
             this._returnApplets();
@@ -469,11 +526,18 @@ class TrayCollapseApplet extends Applet.Applet {
         this._updateArrow();
     }
 
+    _releaseGrab() {
+        if (this._grabbed) {
+            this._grabbed = false;
+            Main.popModal(this.menu.actor);
+        }
+    }
+
     _isInsideMenuOrSelf(actor) {
         for (let a = actor; a; a = a.get_parent()) {
             if (a === this._arrow || a === this.menu.actor)
                 return true;
-            // an icon's own menu
+            // an applet's own menu (gpaste history etc)
             if (a instanceof St.Widget && a.has_style_class_name("menu"))
                 return true;
         }
@@ -484,15 +548,20 @@ class TrayCollapseApplet extends Applet.Applet {
         this._closeSignals = [
             [global.stage, global.stage.connect("captured-event", (actor, event) => {
                 let type = event.type();
-                if (type === Clutter.EventType.BUTTON_PRESS && !this._isInsideMenuOrSelf(event.get_source()))
+                if (type === Clutter.EventType.BUTTON_PRESS && !this._isInsideMenuOrSelf(event.get_source())) {
+                    // like any other menu: a click outside just closes it
                     this.menu.close();
-                else if (type === Clutter.EventType.KEY_PRESS && event.get_key_symbol() === Clutter.KEY_Escape)
+                    return Clutter.EVENT_STOP;
+                }
+                if (type === Clutter.EventType.KEY_PRESS && event.get_key_symbol() === Clutter.KEY_Escape) {
                     this.menu.close();
+                    return Clutter.EVENT_STOP;
+                }
                 return Clutter.EVENT_PROPAGATE;
             })],
-            // clicked on a window or the desktop. null focus = some menu opened, ignore
+            // backup for when we let go of the grab for an app menu
             [global.display, global.display.connect("notify::focus-window", () => {
-                if (global.display.focus_window)
+                if (!this._grabbed && global.display.focus_window)
                     this.menu.close();
             })],
         ];
@@ -553,10 +622,15 @@ class TrayCollapseApplet extends Applet.Applet {
 
     on_applet_removed_from_panel() {
         this.menu.close();
-        if (this._reapplyId)
-            GLib.source_remove(this._reapplyId);
+        for (let id of [this._reapplyId, this._enforceId])
+            if (id)
+                GLib.source_remove(id);
         for (let [obj, id] of this._signals)
             obj.disconnect(id);
+        for (let ids of this._watched.values())
+            for (let [obj, id] of ids)
+                obj.disconnect(id);
+        this._watched.clear();
         for (let icon of this._xappIcons.values())
             icon.destroy();
         this._xappIcons.clear();

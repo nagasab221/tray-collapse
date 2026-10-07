@@ -12,17 +12,21 @@
         "units": "px",
         "description": "Icon size"
     },
+    "one-row": {
+        "type": "switch",
+        "default": true,
+        "description": "Everything in one row"
+    },
     "columns": {
-        "type": "combobox",
-        "default": 0,
-        "description": "Layout",
-        "options": {
-            "One row": 0,
-            "3 × 3": 3,
-            "3 × 4": 4,
-            "3 × 5": 5
-        },
-        "tooltip": "How many icons per row. Extra rows get added if you have more icons."
+        "type": "spinbutton",
+        "default": 3,
+        "min": 1,
+        "max": 10,
+        "step": 1,
+        "units": "per row",
+        "description": "Icons per row",
+        "dependency": "!one-row",
+        "tooltip": "3 gives you a 3×3 grid, 4 a 3×4 and so on. Rows get added as needed."
     },
     "head-icons": {
         "type": "header",
@@ -30,26 +34,19 @@
     },
     "icons": {
         "type": "list",
-        "description": "Where each icon goes",
+        "description": "Icons",
         "height": 260,
-        "hidden-buttons": ["+"],
+        "hidden-buttons": ["+", "edit"],
         "columns": [
             { "id": "name", "title": "Icon", "type": "string" },
-            {
-                "id": "where",
-                "title": "Show in",
-                "type": "string",
-                "options": {
-                    "Pop-up": "popup",
-                    "Panel (left of the arrow)": "panel",
-                    "Hidden": "hidden"
-                }
-            }
+            { "id": "show", "title": "Show", "type": "boolean", "default": true },
+            { "id": "pinned", "title": "Pin to panel", "type": "boolean", "default": false },
+            { "id": "right", "title": "Right of the arrow", "type": "boolean", "default": false }
         ],
         "default": []
     },
     "icons-help": {
         "type": "label",
-        "description": "Icons get added here on their own when an app shows one. Double-click to change where it goes, use the arrows to reorder. Removing one just makes it forget your choice."
+        "description": "Click the checkboxes to change things. Unticked Show = hidden completely. Pinned icons sit on the panel instead of the pop-up, on the left of the arrow unless you tick Right. Use the arrows to reorder. New icons get added here on their own."
     }
 }

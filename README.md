@@ -30,9 +30,9 @@ or `./install.sh --remove`. Your tray icons go back to normal.
 Right-click the arrow and hit Configure. You can:
 
 - change the icon size in the pop-up
-- pick a layout: one row, or 3, 4 or 5 icons per row (3×3, 3×4, 3×5)
-- choose per icon whether it goes in the pop-up, stays on the panel (left of the arrow),
-  or is hidden completely
+- turn off "one row" and pick how many icons per row (3 for a 3×3 grid, 4 for 3×4 and so on)
+- tick boxes per icon: untick Show to hide it completely, tick Pin to panel to keep it
+  out of the pop-up, and Right of the arrow to put it on the other side
 - reorder icons with the arrows
 
 New icons show up in the list by themselves the first time an app puts one in the tray.
