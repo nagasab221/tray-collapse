@@ -1,0 +1,55 @@
+{
+    "head-popup": {
+        "type": "header",
+        "description": "Pop-up"
+    },
+    "icon-size": {
+        "type": "spinbutton",
+        "default": 22,
+        "min": 12,
+        "max": 64,
+        "step": 2,
+        "units": "px",
+        "description": "Icon size"
+    },
+    "columns": {
+        "type": "combobox",
+        "default": 0,
+        "description": "Layout",
+        "options": {
+            "One row": 0,
+            "3 × 3": 3,
+            "3 × 4": 4,
+            "3 × 5": 5
+        },
+        "tooltip": "How many icons per row. Extra rows get added if you have more icons."
+    },
+    "head-icons": {
+        "type": "header",
+        "description": "Icons"
+    },
+    "icons": {
+        "type": "list",
+        "description": "Where each icon goes",
+        "height": 260,
+        "hidden-buttons": ["+"],
+        "columns": [
+            { "id": "name", "title": "Icon", "type": "string" },
+            {
+                "id": "where",
+                "title": "Show in",
+                "type": "string",
+                "options": {
+                    "Pop-up": "popup",
+                    "Panel (left of the arrow)": "panel",
+                    "Hidden": "hidden"
+                }
+            }
+        ],
+        "default": []
+    },
+    "icons-help": {
+        "type": "label",
+        "description": "Icons get added here on their own when an app shows one. Double-click to change where it goes, use the arrows to reorder. Removing one just makes it forget your choice."
+    }
+}

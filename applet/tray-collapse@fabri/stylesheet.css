@@ -1,12 +1,9 @@
 .tray-collapse-box {
     padding: 2px;
-    spacing: 4px;
 }
 
-/* icon boxes + hover fade */
+/* icon boxes + hover fade. size comes from the settings */
 .tray-collapse-box .tray-collapse-cell {
-    min-width: 36px;
-    min-height: 36px;
     padding: 0;
     margin: 0;
     border-radius: 6px;
@@ -22,4 +19,8 @@
 .tray-collapse-box .tray-collapse-cell:active,
 .tray-collapse-box .tray-collapse-cell:checked {
     background-color: rgba(127, 127, 127, 0.40);
+}
+
+.tray-collapse-empty {
+    padding: 6px 10px;
 }
