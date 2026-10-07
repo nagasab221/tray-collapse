@@ -183,9 +183,10 @@ class XAppIcon {
         this._tooltip.hide();
         let [x, y, o] = this._position();
         if (pressed) {
-            // the app's own menu needs the mouse, so let go of ours first
+            // the app's own menu needs the mouse, so let go of ours first.
+            // some apps already act on the press (open a window), so count the click from here
             if (this.inPopup)
-                this.owner._releaseGrab();
+                this.owner._onIconPress();
             this.proxy.call_button_press(x, y, event.get_button(), event.get_time(), o, null, null);
         } else {
             this.proxy.call_button_release(x, y, event.get_button(), event.get_time(), o, null, null);
@@ -768,6 +769,15 @@ class TrayCollapseApplet extends Applet.Applet {
             this._grabbed = false;
             Main.popModal(this.menu.actor);
         }
+    }
+
+    _onIconPress() {
+        this._lastIconClick = GLib.get_monotonic_time();
+        this._releaseGrab();
+        // the release may never reach us (the app's new window can end up under the mouse),
+        // so don't wait for it to start taking the mouse back
+        if (!this.closeOnClick)
+            this._startRegrab();
     }
 
     _afterIconClick() {

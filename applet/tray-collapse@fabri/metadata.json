@@ -2,6 +2,6 @@
     "uuid": "tray-collapse@fabri",
     "name": "Tray Collapse",
     "description": "Hide your tray icons behind an arrow, like on Windows",
-    "version": "3.4",
+    "version": "3.5",
     "max-instances": -1
 }
